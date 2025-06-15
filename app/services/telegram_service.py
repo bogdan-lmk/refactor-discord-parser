@@ -35,7 +35,7 @@ class TelegramService:
         
         # State management
         self.server_topics: Dict[str, int] = {}  # server_name -> topic_id
-        self.topic_creation_lock = Lock()
+        self._async_lock = asyncio.Lock()
         self.user_states: Dict[int, dict] = {}  # user_id -> state
         
         # Message tracking
@@ -246,22 +246,43 @@ class TelegramService:
         if not self.settings.use_topics:
             return None
         
-        # Check cache first
-        if server_name in self.server_topics:
-            topic_id = self.server_topics[server_name]
-            
-            # Verify topic still exists
-            if await self._verify_topic_exists(topic_id):
-                return topic_id
-            else:
-                # Topic was deleted, remove from cache
-                del self.server_topics[server_name]
-        
-        # Create new topic
-        with self.topic_creation_lock:
-            # Double-check after acquiring lock
+        async with self._async_lock:
+            # Check cache first
             if server_name in self.server_topics:
-                return self.server_topics[server_name]
+                topic_id = self.server_topics[server_name]
+                
+                # Verify topic still exists
+                if await self._verify_topic_exists(topic_id):
+                    return topic_id
+                else:
+                    # Topic was deleted, remove from cache
+                    del self.server_topics[server_name]
+            
+            # Create new topic if needed
+            try:
+                topic = self.bot.create_forum_topic(
+                    chat_id=self.settings.telegram_chat_id,
+                    name=f"🏰 {server_name}",
+                    icon_color=0x6FB9F0
+                )
+                
+                topic_id = topic.message_thread_id
+                self.server_topics[server_name] = topic_id
+                
+                # Save to persistent storage
+                asyncio.create_task(self._save_persistent_data())
+                
+                self.logger.info("Created new topic", 
+                               server=server_name,
+                               topic_id=topic_id)
+                
+                return topic_id
+                
+            except Exception as e:
+                self.logger.error("Failed to create topic", 
+                                server=server_name,
+                                error=str(e))
+                return None
             
             try:
                 topic = self.bot.create_forum_topic(
@@ -506,8 +527,8 @@ class TelegramService:
         """Add callback for new messages"""
         self.new_message_callbacks.append(callback)
     
-    def start_bot(self) -> None:
-        """Start the Telegram bot"""
+    async def start_bot_async(self) -> None:
+        """Start the Telegram bot asynchronously"""
         if self.bot_running:
             self.logger.warning("Bot is already running")
             return
@@ -520,16 +541,19 @@ class TelegramService:
                        use_topics=self.settings.use_topics)
         
         try:
-            self.bot.polling(none_stop=True, interval=1)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, 
+                lambda: self.bot.polling(
+                    none_stop=True,
+                    interval=1,
+                    timeout=30,
+                    skip_pending=True
+                )
+            )
         except Exception as e:
             self.logger.error("Bot polling error", error=str(e))
         finally:
-            self.bot_running = False
-    
-    def stop_bot(self) -> None:
-        """Stop the Telegram bot"""
-        if self.bot_running:
-            self.bot.stop_polling()
             self.bot_running = False
             self.logger.info("Telegram bot stopped")
     

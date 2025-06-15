@@ -1,5 +1,6 @@
 # app/services/message_processor.py
 import asyncio
+import hashlib
 import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
@@ -18,6 +19,7 @@ class MessageProcessor:
                  settings: Settings,
                  discord_service: DiscordService,
                  telegram_service: TelegramService,
+                 redis_client = None,
                  logger = None):
         self.settings = settings
         self.discord_service = discord_service
@@ -34,9 +36,11 @@ class MessageProcessor:
         # Background tasks
         self.tasks: List[asyncio.Task] = []
         
-        # Message queues for processing
+        # Message queues and deduplication
         self.message_queue = asyncio.Queue(maxsize=1000)
         self.batch_queue: List[DiscordMessage] = []
+        self.redis_client = redis_client
+        self.message_ttl = settings.message_ttl_seconds
         
         # Periodic cleanup
         self.last_cleanup = datetime.now()
@@ -89,12 +93,9 @@ class MessageProcessor:
         discord_task = asyncio.create_task(self.discord_service.start_websocket_monitoring())
         self.tasks.append(discord_task)
         
-        # Start Telegram bot in separate thread
-        telegram_thread = threading.Thread(
-            target=self.telegram_service.start_bot,
-            daemon=True
-        )
-        telegram_thread.start()
+        # Start Telegram bot asynchronously
+        telegram_task = asyncio.create_task(self.telegram_service.start_bot_async())
+        self.tasks.append(telegram_task)
         
         # Perform initial sync
         await self._perform_initial_sync()
@@ -102,10 +103,17 @@ class MessageProcessor:
         self.logger.info("Message Processor started successfully")
         
         try:
-            # Wait for all tasks
-            await asyncio.gather(*self.tasks)
+            # Wait for all tasks with error isolation
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+            
+            # Log any individual task failures
+            for task in self.tasks:
+                if task.done() and task.exception():
+                    self.logger.error("Task failed",
+                                   task_name=task.get_name(),
+                                   error=str(task.exception()))
         except Exception as e:
-            self.logger.error("Error in message processor", error=str(e))
+            self.logger.error("Critical error in message processor", error=str(e))
         finally:
             await self.stop()
     
@@ -201,12 +209,23 @@ class MessageProcessor:
     async def _process_single_message(self, message: DiscordMessage) -> None:
         """Process a single Discord message"""
         try:
+            # Create unique message ID
+            message_hash = hashlib.md5(
+                f"{message.guild_id}:{message.channel_id}:{message.message_id}".encode()
+            ).hexdigest()
+            
+            # Check if already processed
+            if await self._is_message_processed(message_hash):
+                self.logger.debug("Message already processed", message_hash=message_hash)
+                return
+                
             # Send to Telegram
             success = await self.telegram_service.send_message(message)
             
             if success:
                 self.stats.messages_processed_today += 1
                 self.stats.messages_processed_total += 1
+                await self._mark_message_processed(message_hash)
             else:
                 self.stats.errors_last_hour += 1
                 self.stats.last_error = "Failed to send message to Telegram"
@@ -409,6 +428,31 @@ class MessageProcessor:
             failed_count = len(messages_to_process) - sent_count
             self.stats.errors_last_hour += failed_count
     
+    async def _is_message_processed(self, message_hash: str) -> bool:
+        """Check if message was already processed"""
+        if not self.redis_client:
+            return False
+            
+        try:
+            return await self.redis_client.exists(f"msg:{message_hash}")
+        except Exception as e:
+            self.logger.error("Redis check failed", error=str(e))
+            return False
+
+    async def _mark_message_processed(self, message_hash: str) -> None:
+        """Mark message as processed"""
+        if not self.redis_client:
+            return
+            
+        try:
+            await self.redis_client.setex(
+                f"msg:{message_hash}",
+                self.message_ttl,
+                "1"
+            )
+        except Exception as e:
+            self.logger.error("Redis mark failed", error=str(e))
+
     def get_status(self) -> Dict[str, any]:
         """Get comprehensive system status"""
         return {

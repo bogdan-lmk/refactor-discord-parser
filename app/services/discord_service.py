@@ -73,27 +73,77 @@ class DiscordService:
         return True
     
     async def _validate_token(self, session: aiohttp.ClientSession, token_index: int) -> bool:
-        """Validate Discord token"""
+        """Validate Discord token and permissions"""
         try:
             await self.rate_limiter.wait_if_needed(f"token_{token_index}")
             
+            # First check basic token validity
             async with session.get('https://discord.com/api/v9/users/@me') as response:
-                if response.status == 200:
-                    user_data = await response.json()
-                    self.logger.info("Token valid for user", 
-                                   username=user_data.get('username'),
-                                   token_index=token_index)
-                    self.rate_limiter.record_success()
-                    return True
-                else:
+                if response.status != 200:
+                    self.logger.error("Invalid token", token_index=token_index)
                     self.rate_limiter.record_error()
                     return False
-                    
+                
+                user_data = await response.json()
+                self.logger.info("Token valid for user", 
+                               username=user_data.get('username'),
+                               token_index=token_index)
+            
+            # Then check required permissions
+            if not await self._validate_token_permissions(session):
+                self.logger.error("Token missing required permissions", token_index=token_index)
+                self.rate_limiter.record_error()
+                return False
+            
+            # Finally check guild access
+            async with session.get('https://discord.com/api/v9/users/@me/guilds') as guilds_res:
+                if guilds_res.status != 200:
+                    self.logger.error("Cannot access guilds", token_index=token_index)
+                    self.rate_limiter.record_error()
+                    return False
+                
+                guilds = await guilds_res.json()
+                if not guilds:
+                    self.logger.error("Token has no guild access", token_index=token_index)
+                    self.rate_limiter.record_error()
+                    return False
+            
+            self.rate_limiter.record_success()
+            return True
+                
         except Exception as e:
             self.logger.error("Token validation failed", 
                             token_index=token_index, 
                             error=str(e))
             self.rate_limiter.record_error()
+            return False
+
+    async def _validate_token_permissions(self, session: aiohttp.ClientSession) -> bool:
+        """Validate token has required permissions"""
+        try:
+            # Check guild access
+            async with session.get('https://discord.com/api/v9/users/@me/guilds') as guilds_res:
+                if guilds_res.status != 200:
+                    self.logger.warning("Token cannot access guilds")
+                    return False
+                
+                # Check message content intent
+                async with session.get('https://discord.com/api/v9/users/@me') as user_res:
+                    if user_res.status != 200:
+                        return False
+                    
+                    user_data = await user_res.json()
+                    flags = user_data.get('flags', 0)
+                    
+                    # Check for MESSAGE_CONTENT intent flag
+                    if not (flags & (1 << 18)):  # MESSAGE_CONTENT intent flag
+                        self.logger.warning("Token missing MESSAGE_CONTENT intent")
+                        return False
+                    
+            return True
+            
+        except Exception as e:
+            self.logger.error("Permission validation failed", error=str(e))
             return False
     
     async def _discover_servers(self) -> None:
@@ -337,18 +387,32 @@ class DiscordService:
     async def _websocket_connection_loop(self, session: aiohttp.ClientSession, token_index: int) -> None:
         """WebSocket connection loop for a single token"""
         while self.running:
+            ws = None
             try:
                 # Get gateway URL
                 async with session.get('https://discord.com/api/v9/gateway') as response:
                     gateway_data = await response.json()
                     gateway_url = gateway_data['url']
                 
-                # Connect to WebSocket
-                async with session.ws_connect(f"{gateway_url}/?v=9&encoding=json") as ws:
-                    self.logger.info("WebSocket connected", token_index=token_index)
-                    
-                    await self._handle_websocket_messages(ws, token_index)
-                    
+                # Connect to WebSocket with timeout
+                timeout = aiohttp.ClientTimeout(total=300, sock_read=60)  # 5 min total, 1 min read
+                ws = await session.ws_connect(
+                    f"{gateway_url}/?v=9&encoding=json",
+                    timeout=timeout,
+                    heartbeat=30
+                )
+                self.websocket_connections.append(ws)
+                self.logger.info("WebSocket connected", token_index=token_index)
+                
+                try:
+                    await asyncio.wait_for(
+                        self._handle_websocket_messages(ws, token_index),
+                        timeout=3600  # 1 hour max
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.warning("WebSocket timeout, reconnecting...")
+                    continue
+                
             except Exception as e:
                 self.logger.error("WebSocket connection error", 
                                 token_index=token_index,
@@ -356,6 +420,11 @@ class DiscordService:
                 
                 if self.running:
                     await asyncio.sleep(self.settings.websocket_reconnect_delay)
+            finally:
+                if ws and not ws.closed:
+                    await ws.close()
+                if ws in self.websocket_connections:
+                    self.websocket_connections.remove(ws)
     
     async def _handle_websocket_messages(self, ws: aiohttp.ClientWebSocketResponse, token_index: int) -> None:
         """Handle WebSocket messages"""
