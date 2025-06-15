@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     message_batch_size: int = Field(default=10, ge=1, le=50)
     max_history_messages: int = Field(default=100, ge=10, le=500)
     
+    # ИСПРАВЛЕНИЕ: Добавляем отсутствующее поле
+    message_ttl_seconds: int = Field(
+        default=86400,  # 1 день по умолчанию
+        ge=3600,        # минимум 1 час
+        le=604800,      # максимум 1 неделя
+        description="TTL for message deduplication in Redis"
+    )
+    
     # WebSocket Configuration
     websocket_heartbeat_interval: int = Field(default=41250, ge=30000)
     websocket_reconnect_delay: int = Field(default=30, ge=5, le=300)

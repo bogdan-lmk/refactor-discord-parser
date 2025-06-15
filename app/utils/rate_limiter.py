@@ -70,10 +70,31 @@ class RateLimiter:
             bucket.requests += 1
             return True
     
-    async def wait_if_needed(self, identifier: str = "global") -> None:
-        """Wait until rate limit allows request"""
+    # ИСПРАВЛЕНИЕ: Добавляем таймаут для предотвращения бесконечного цикла
+    async def wait_if_needed(self, identifier: str = "global", max_wait: float = 60.0) -> bool:
+        """Wait until rate limit allows request with timeout protection"""
+        start_time = time.time()
+        
         while not await self.acquire(identifier):
-            await asyncio.sleep(0.1)  # Wait 100ms and retry
+            # Проверяем таймаут
+            if time.time() - start_time > max_wait:
+                raise TimeoutError(
+                    f"Rate limiter timeout for {identifier} after {max_wait} seconds. "
+                    f"Consider adjusting rate limits or check for system issues."
+                )
+            
+            # Wait and retry
+            await asyncio.sleep(0.1)
+        
+        return True
+    
+    # Добавляем альтернативный метод без исключений для обратной совместимости
+    async def wait_if_needed_safe(self, identifier: str = "global", max_wait: float = 60.0) -> bool:
+        """Safe version that returns False instead of raising timeout exception"""
+        try:
+            return await self.wait_if_needed(identifier, max_wait)
+        except TimeoutError:
+            return False
     
     def record_success(self):
         """Record successful request for adaptive rate limiting"""
@@ -106,3 +127,22 @@ class RateLimiter:
             "success_count": self.success_count,
             "error_count": self.error_count
         }
+    
+    def reset_stats(self):
+        """Reset statistics (useful for testing or maintenance)"""
+        self.error_count = 0
+        self.success_count = 0
+        self.adaptive_multiplier = 1.0
+    
+    def clear_old_buckets(self, max_age_seconds: int = 3600):
+        """Clear old buckets to prevent memory leaks"""
+        now = time.time()
+        old_buckets = [
+            identifier for identifier, bucket in self.buckets.items()
+            if bucket.reset_time < now - max_age_seconds
+        ]
+        
+        for identifier in old_buckets:
+            del self.buckets[identifier]
+        
+        return len(old_buckets)

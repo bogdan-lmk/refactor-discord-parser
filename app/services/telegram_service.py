@@ -242,7 +242,7 @@ class TelegramService:
         return sent_count
     
     async def _get_or_create_topic(self, server_name: str) -> Optional[int]:
-        """Get existing topic or create new one for server"""
+        """Get existing topic or create new one for server - ИСПРАВЛЕНО: убрано дублирование"""
         if not self.settings.use_topics:
             return None
         
@@ -258,32 +258,7 @@ class TelegramService:
                     # Topic was deleted, remove from cache
                     del self.server_topics[server_name]
             
-            # Create new topic if needed
-            try:
-                topic = self.bot.create_forum_topic(
-                    chat_id=self.settings.telegram_chat_id,
-                    name=f"🏰 {server_name}",
-                    icon_color=0x6FB9F0
-                )
-                
-                topic_id = topic.message_thread_id
-                self.server_topics[server_name] = topic_id
-                
-                # Save to persistent storage
-                asyncio.create_task(self._save_persistent_data())
-                
-                self.logger.info("Created new topic", 
-                               server=server_name,
-                               topic_id=topic_id)
-                
-                return topic_id
-                
-            except Exception as e:
-                self.logger.error("Failed to create topic", 
-                                server=server_name,
-                                error=str(e))
-                return None
-            
+            # Create new topic if needed (ИСПРАВЛЕНО: только один блок создания)
             try:
                 topic = self.bot.create_forum_topic(
                     chat_id=self.settings.telegram_chat_id,
@@ -556,6 +531,18 @@ class TelegramService:
         finally:
             self.bot_running = False
             self.logger.info("Telegram bot stopped")
+    
+    # ИСПРАВЛЕНИЕ: Добавляем отсутствующий метод stop_bot
+    def stop_bot(self) -> None:
+        """Stop the Telegram bot"""
+        if self.bot_running:
+            try:
+                self.bot.stop_polling()
+                self.bot_running = False
+                self.logger.info("Telegram bot stopped")
+            except Exception as e:
+                self.logger.error("Error stopping bot", error=str(e))
+                self.bot_running = False
     
     async def cleanup(self) -> None:
         """Clean up resources"""
