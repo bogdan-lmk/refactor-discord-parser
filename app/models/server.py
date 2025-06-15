@@ -78,6 +78,20 @@ class ServerInfo(BaseModel):
         return v
     
     @property
+    def accessible_channels(self) -> Dict[str, ChannelInfo]:
+        """Get only accessible channels"""
+        return {
+            channel_id: channel_info 
+            for channel_id, channel_info in self.channels.items()
+            if channel_info.is_accessible
+        }
+    
+    @property
+    def channel_count(self) -> int:
+        """Total number of channels"""
+        return len(self.channels)
+    
+    @property
     def accessible_channel_count(self) -> int:
         """Number of accessible channels"""
         return len(self.accessible_channels)
@@ -163,16 +177,4 @@ class SystemStats(BaseModel):
         elif health >= 50:
             return "🟠 Warning"
         else:
-            return "🔴 Critical"s(self) -> Dict[str, ChannelInfo]:
-        """Get only accessible channels"""
-        return {
-            channel_id: channel_info 
-            for channel_id, channel_info in self.channels.items()
-            if channel_info.is_accessible
-        }
-    
-    @property
-    def channel_count(self) -> int:
-        """Total number of channels"""
-        return len(self.channels)
-    
+            return "🔴 Critical"
