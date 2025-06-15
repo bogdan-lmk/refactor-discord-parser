@@ -47,6 +47,86 @@ class TelegramService:
         # Bot running state
         self.bot_running = False
         
+    async def initialize(self) -> bool:
+        """Initialize Telegram service"""
+        try:
+            # Test bot token
+            bot_info = self.bot.get_me()
+            self.logger.info("Telegram bot initialized", 
+                           bot_username=bot_info.username,
+                           bot_id=bot_info.id)
+            
+            # Load persistent data
+            await self._load_persistent_data()
+            
+            # Verify chat access
+            if await self._verify_chat_access():
+                self.logger.info("Chat access verified", 
+                               chat_id=self.settings.telegram_chat_id)
+                return True
+            else:
+                self.logger.error("Cannot access Telegram chat", 
+                                chat_id=self.settings.telegram_chat_id)
+                return False
+                
+        except Exception as e:
+            self.logger.error("Telegram service initialization failed", error=str(e))
+            return False
+    
+    async def _verify_chat_access(self) -> bool:
+        """Verify that bot can access the configured chat"""
+        try:
+            chat = self.bot.get_chat(self.settings.telegram_chat_id)
+            
+            # Check if it's a supergroup with topics
+            if hasattr(chat, 'is_forum') and chat.is_forum:
+                self.logger.info("Chat supports topics", chat_type=chat.type)
+                return True
+            elif chat.type in ['group', 'supergroup']:
+                self.logger.warning("Chat does not support topics", 
+                                  chat_type=chat.type,
+                                  note="Topics disabled, will use regular messages")
+                return True
+            else:
+                self.logger.error("Invalid chat type", chat_type=chat.type)
+                return False
+                
+        except Exception as e:
+            self.logger.error("Chat verification failed", error=str(e))
+            return False
+    
+    async def _load_persistent_data(self) -> None:
+        """Load persistent data from Redis or file"""
+        try:
+            if self.redis_client:
+                # Load from Redis
+                data = await self._load_from_redis()
+            else:
+                # Load from file
+                data = self._load_from_file()
+            
+            if data:
+                self.server_topics = data.get('topics', {})
+                self.message_mappings = data.get('messages', {})
+                
+                self.logger.info("Loaded persistent data", 
+                               topics=len(self.server_topics),
+                               messages=len(self.message_mappings))
+            
+        except Exception as e:
+            self.logger.error("Failed to load persistent data", error=str(e))
+    
+    def _load_from_file(self) -> Optional[dict]:
+        """Load data from JSON file"""
+        try:
+            with open('telegram_data.json', 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            self.logger.error("Error loading from file", error=str(e))
+            return {}
+    
     async def _load_from_redis(self) -> Optional[dict]:
         """Load data from Redis"""
         try:
@@ -457,84 +537,4 @@ class TelegramService:
         """Clean up resources"""
         self.stop_bot()
         await self._save_persistent_data()
-        self.logger.info("Telegram service cleaned up") initialize(self) -> bool:
-        """Initialize Telegram service"""
-        try:
-            # Test bot token
-            bot_info = self.bot.get_me()
-            self.logger.info("Telegram bot initialized", 
-                           bot_username=bot_info.username,
-                           bot_id=bot_info.id)
-            
-            # Load persistent data
-            await self._load_persistent_data()
-            
-            # Verify chat access
-            if await self._verify_chat_access():
-                self.logger.info("Chat access verified", 
-                               chat_id=self.settings.telegram_chat_id)
-                return True
-            else:
-                self.logger.error("Cannot access Telegram chat", 
-                                chat_id=self.settings.telegram_chat_id)
-                return False
-                
-        except Exception as e:
-            self.logger.error("Telegram service initialization failed", error=str(e))
-            return False
-    
-    async def _verify_chat_access(self) -> bool:
-        """Verify that bot can access the configured chat"""
-        try:
-            chat = self.bot.get_chat(self.settings.telegram_chat_id)
-            
-            # Check if it's a supergroup with topics
-            if hasattr(chat, 'is_forum') and chat.is_forum:
-                self.logger.info("Chat supports topics", chat_type=chat.type)
-                return True
-            elif chat.type in ['group', 'supergroup']:
-                self.logger.warning("Chat does not support topics", 
-                                  chat_type=chat.type,
-                                  note="Topics disabled, will use regular messages")
-                return True
-            else:
-                self.logger.error("Invalid chat type", chat_type=chat.type)
-                return False
-                
-        except Exception as e:
-            self.logger.error("Chat verification failed", error=str(e))
-            return False
-    
-    async def _load_persistent_data(self) -> None:
-        """Load persistent data from Redis or file"""
-        try:
-            if self.redis_client:
-                # Load from Redis
-                data = await self._load_from_redis()
-            else:
-                # Load from file
-                data = self._load_from_file()
-            
-            if data:
-                self.server_topics = data.get('topics', {})
-                self.message_mappings = data.get('messages', {})
-                
-                self.logger.info("Loaded persistent data", 
-                               topics=len(self.server_topics),
-                               messages=len(self.message_mappings))
-            
-        except Exception as e:
-            self.logger.error("Failed to load persistent data", error=str(e))
-    
-    def _load_from_file(self) -> Optional[dict]:
-        """Load data from JSON file"""
-        try:
-            with open('telegram_data.json', 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return {}
-        except Exception as e:
-            self.logger.error("Error loading from file", error=str(e))
-            return {}
-    
-  
+        self.logger.info("Telegram service cleaned up")
